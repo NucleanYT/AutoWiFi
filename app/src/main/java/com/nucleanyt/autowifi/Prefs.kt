@@ -24,6 +24,11 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_USE_ROOT, false)
         set(value) = sp.edit().putBoolean(KEY_USE_ROOT, value).apply()
 
+    /** MIUI's battery saver can't be read by apps, so the user confirms it. */
+    var miuiBatteryConfirmed: Boolean
+        get() = sp.getBoolean(KEY_MIUI_BATTERY_CONFIRMED, false)
+        set(value) = sp.edit().putBoolean(KEY_MIUI_BATTERY_CONFIRMED, value).apply()
+
     val savedSsids: Set<String>
         get() = sp.getStringSet(KEY_SAVED_SSIDS, emptySet())!!.toSet()
 
@@ -48,5 +53,6 @@ class Prefs(context: Context) {
         const val KEY_WIFI_OFF_WHEN_AWAY = "wifi_off_when_away"
         const val KEY_USE_ROOT = "use_root"
         const val KEY_SAVED_SSIDS = "saved_ssids"
+        const val KEY_MIUI_BATTERY_CONFIRMED = "miui_battery_confirmed"
     }
 }

@@ -28,20 +28,26 @@ Each build is signed with a different temporary key. If Android won't install ov
 
 ## Setup (in the app)
 
-Work down the **Setup** list until every item has a ✓:
+1. Start Shizuku. Then, in AutoWiFi's **Setup** list, tap **Allow Shizuku**.
+2. Tap **Set up everything automatically**. It will:
+   - grant AutoWiFi its location (all the time) and notification permissions,
+   - turn Location and Wi-Fi scanning on,
+   - turn battery optimization off,
+   - on Xiaomi phones, turn on MIUI Autostart for AutoWiFi and Shizuku,
+   - import your phone's saved Wi-Fi networks (Android 11+),
+   - turn auto-switching on.
+3. Do whatever the summary says is still left. Each item has a button in the Setup list.
 
-1. **Location permission**: Android only shows nearby Wi-Fi networks to apps with location access. Choose *Allow all the time* so AutoWiFi can restart itself after a reboot.
-2. **Location turned on** and **Wi-Fi scanning** turned on, so the phone can find networks while Wi-Fi is off.
-3. **Shizuku or root access**
-4. **Battery optimization off** (recommended)
+You can still add networks by hand under **Saved Wi-Fi networks**: **Add nearby…** or **Add by name…**. Any network you connect to is added automatically.
 
-Then add your networks under **Saved Wi-Fi networks**:
+### Xiaomi / Redmi / POCO (MIUI)
 
-- **Import from phone** copies the phone's saved Wi-Fi list (needs Shizuku/root, Android 11+).
-- **Add nearby…** picks from the networks around you.
-- Any network you connect to is added automatically.
+Xiaomi adds a few things no app can do for you:
 
-Last, turn on **Auto-switch between Wi-Fi and mobile data**.
+- **Developer options**: go to Settings → About phone and tap **MIUI version** 7 times.
+- **Pairing Shizuku**: if the box for typing the pairing code doesn't appear, set the notification style to Android in Settings → Notifications & Control center.
+- **USB debugging (Security settings)**: turn this on in Developer options. Xiaomi requires a SIM card and a Mi account for it. Without it, MIUI silently ignores mobile-data switching. AutoWiFi checks for this and warns you if mobile data didn't actually switch.
+- **Battery saver → No restrictions** for AutoWiFi and Shizuku. Apps can't read this setting, so the app opens the screen for you and you tap **Done** when it's set.
 
 ## Notes
 

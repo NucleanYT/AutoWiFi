@@ -40,6 +40,10 @@ class AutoSwitchService : Service() {
         val savedInRange: List<String>,
         val reason: String,
         val lastAction: String,
+        /** Set when `svc data` reported success but mobile data didn't change. */
+        val dataSwitchBlocked: Boolean,
+        /** Set once a data switch was seen to work. */
+        val dataSwitchVerified: Boolean,
     )
 
     private lateinit var prefs: Prefs
@@ -56,6 +60,9 @@ class AutoSwitchService : Service() {
     private var lastWifiCommandAt = Long.MIN_VALUE / 2
     private var lastDataCommandAt = Long.MIN_VALUE / 2
     private var lastCommandedData: Boolean? = null
+    private var dataToVerify: Boolean? = null
+    private var dataSwitchBlocked = false
+    private var dataSwitchVerified = false
     private var lastAction = "Nothing yet"
     private var shownHint: String? = null
     private var shownNotificationText: String? = null
@@ -177,9 +184,11 @@ class AutoSwitchService : Service() {
         connectivity.registerNetworkCallback(request, networkCallback, handler)
     }
 
-    private fun scheduleEvaluate() {
+    private fun scheduleEvaluate() = scheduleEvaluateIn(500)
+
+    private fun scheduleEvaluateIn(delayMs: Long) {
         handler.removeCallbacks(evaluateRunnable)
-        handler.postDelayed(evaluateRunnable, 500)
+        handler.postDelayed(evaluateRunnable, delayMs)
     }
 
     @Suppress("DEPRECATION")
@@ -222,16 +231,28 @@ class AutoSwitchService : Service() {
             if (setWifi(wantWifi, backend)) lastAction = "Turned Wi-Fi ${onOff(wantWifi)} (${time()})"
         }
 
+        // Check that the last data switch really happened. MIUI silently ignores `svc data`
+        // unless "USB debugging (Security settings)" is on.
+        val verifying = dataToVerify
+        if (verifying != null && now - lastDataCommandAt >= DATA_VERIFY_DELAY_MS) {
+            readDataRaw()?.let { actual ->
+                dataSwitchBlocked = actual != verifying
+                if (dataSwitchBlocked) lastCommandedData = actual else dataSwitchVerified = true
+            }
+            dataToVerify = null
+        }
+
         var dataOn = readDataEnabled(backend)
         val wantData = decision.data
-        if (wantData != null && wantData != (dataOn ?: lastCommandedData) &&
-            now - lastDataCommandAt >= COMMAND_COOLDOWN_MS
-        ) {
+        val dataCooldown = if (dataSwitchBlocked) BLOCKED_RETRY_MS else COMMAND_COOLDOWN_MS
+        if (wantData != null && wantData != (dataOn ?: lastCommandedData) && now - lastDataCommandAt >= dataCooldown) {
             lastDataCommandAt = now
             if (setData(wantData, backend)) {
                 lastCommandedData = wantData
+                dataToVerify = wantData
                 dataOn = wantData
                 lastAction = "Turned mobile data ${onOff(wantData)} (${time()})"
+                scheduleEvaluateIn(DATA_VERIFY_DELAY_MS + 500)
             }
         }
 
@@ -263,6 +284,8 @@ class AutoSwitchService : Service() {
             savedInRange = inRange,
             reason = decision.reason,
             lastAction = lastAction,
+            dataSwitchBlocked = dataSwitchBlocked,
+            dataSwitchVerified = dataSwitchVerified,
         )
         status = current
         updateStatusNotification(current)
@@ -294,13 +317,16 @@ class AutoSwitchService : Service() {
             .distinct()
     }
 
+    private fun readDataRaw(): Boolean? = try {
+        telephony.isDataEnabled
+    } catch (e: SecurityException) {
+        null
+    }
+
     private fun readDataEnabled(backend: Backend): Boolean? {
-        try {
-            return telephony.isDataEnabled
-        } catch (e: SecurityException) {
-            // Some Android versions want READ_PHONE_STATE. Use what we last set, and only
-            // ask the shell when we have never set it (each root call may show a toast).
-        }
+        // Some Android versions want READ_PHONE_STATE. Then use what we last set, and only
+        // ask the shell when we have never set it (each root call may show a toast).
+        readDataRaw()?.let { return it }
         if (lastCommandedData == null && backend != Backend.NONE) {
             lastCommandedData = when (Privileged.exec(this, "settings get global mobile_data")?.output?.trim()) {
                 "1" -> true
@@ -333,8 +359,11 @@ class AutoSwitchService : Service() {
             s.savedInRange.isNotEmpty() -> "Connecting to ${s.savedInRange.first()}…"
             else -> "No saved Wi-Fi in range"
         }
-        val text = "Wi-Fi ${onOff(s.wifiOn)} · Mobile data ${s.dataOn?.let { onOff(it) } ?: "?"}" +
-            if (s.backend == Backend.NONE) " · Shizuku/root not set up" else ""
+        val text = "Wi-Fi ${onOff(s.wifiOn)} · Mobile data ${s.dataOn?.let { onOff(it) } ?: "?"}" + when {
+            s.backend == Backend.NONE -> " · Shizuku/root not set up"
+            s.dataSwitchBlocked -> " · Can't switch data — open AutoWiFi"
+            else -> ""
+        }
         if (title + text == shownNotificationText) return
         shownNotificationText = title + text
         notifications.notify(STATUS_NOTIFICATION_ID, buildStatusNotification(title, text))
@@ -392,6 +421,8 @@ class AutoSwitchService : Service() {
         private const val SCAN_MAX_AGE_US = 3 * 60 * 1_000_000L
         private const val MIN_RSSI_DBM = -85
         private const val COMMAND_COOLDOWN_MS = 15_000L
+        private const val DATA_VERIFY_DELAY_MS = 5_000L
+        private const val BLOCKED_RETRY_MS = 5 * 60_000L
 
         @Volatile
         var running = false

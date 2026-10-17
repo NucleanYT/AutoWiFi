@@ -15,6 +15,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
@@ -58,6 +59,14 @@ class MainActivity : Activity() {
     private var shownChecks: String? = null
     private var shownNetworks: String? = null
     private var updatingUi = false
+
+    private lateinit var autoSetupButton: Button
+    private var autoSetupRunning = false
+
+    // Xiaomi settings only the shell can read; refreshed in the background.
+    private var shellState = DeviceSetup.ShellState(null, null)
+    private var shellStateAt = 0L
+    private var shellStateLoading = false
 
     private val refresher = object : Runnable {
         override fun run() {
@@ -126,6 +135,18 @@ class MainActivity : Activity() {
         root.addView(masterSwitch, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         root.addView(header("Setup"))
+        root.addView(
+            small(
+                "1. Get Shizuku running and allow AutoWiFi to use it (first item below).\n" +
+                    "2. Tap \"Set up everything automatically\" — it does the rest.",
+            ),
+        )
+        autoSetupButton = Button(this).apply {
+            text = "Set up everything automatically"
+            setAllCaps(false)
+            setOnClickListener { runAutoSetup() }
+        }
+        root.addView(autoSetupButton, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         setupList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(setupList)
 
@@ -209,6 +230,11 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- Refresh
 
     private fun refresh() {
+        if (isDestroyed) return
+        refreshShellState()
+        autoSetupButton.isEnabled = !autoSetupRunning
+        autoSetupButton.text = if (autoSetupRunning) "Setting up…" else "Set up everything automatically"
+
         updatingUi = true
         masterSwitch.isChecked = prefs.enabled
         dataOffSwitch.isChecked = prefs.dataOffOnWifi
@@ -238,6 +264,25 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun refreshShellState() {
+        val backend = Privileged.backend(this)
+        if (!DeviceSetup.isXiaomi || backend == Backend.NONE || shellStateLoading) return
+        // Root managers may show a toast for every call, so ask root less often.
+        val maxAge = if (backend == Backend.SHIZUKU) 10_000L else 120_000L
+        val now = SystemClock.elapsedRealtime()
+        if (shellStateAt != 0L && now - shellStateAt < maxAge) return
+        shellStateLoading = true
+        background.execute {
+            val state = DeviceSetup.readShellState(applicationContext)
+            ui.post {
+                shellState = state
+                shellStateAt = SystemClock.elapsedRealtime()
+                shellStateLoading = false
+                refresh()
+            }
+        }
+    }
+
     private fun statusLine(): String {
         if (!prefs.enabled) return "Auto-switching is off."
         val s = AutoSwitchService.status ?: return "Starting…"
@@ -255,7 +300,8 @@ class MainActivity : Activity() {
             "Wi-Fi: $wifiText\n" +
             "Mobile data: $dataText\n" +
             "Control: ${if (s.backend == Backend.NONE) "suggestions only (no Shizuku/root)" else s.backend.label}\n" +
-            "Last action: ${s.lastAction}"
+            "Last action: ${s.lastAction}" +
+            if (s.dataSwitchBlocked) "\n⚠ Mobile data didn't switch — see Setup below." else ""
     }
 
     private fun checkView(check: Check) = LinearLayout(this).apply {
@@ -312,6 +358,9 @@ class MainActivity : Activity() {
     private fun checks(): List<Check> {
         val list = mutableListOf<Check>()
 
+        list += controlCheck()
+        if (DeviceSetup.isXiaomi) list += miuiDebuggingCheck()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list += Check(
                 title = "Notifications",
@@ -358,8 +407,6 @@ class MainActivity : Activity() {
             actions = listOf("Turn on" to ::enableWifiScanning),
         )
 
-        list += controlCheck()
-
         val power = getSystemService(PowerManager::class.java)
         list += Check(
             title = "Battery optimization off",
@@ -374,7 +421,66 @@ class MainActivity : Activity() {
                 },
             ),
         )
+
+        if (DeviceSetup.isXiaomi) list += miuiChecks()
         return list
+    }
+
+    private fun miuiDebuggingCheck(): Check {
+        val blocked = AutoSwitchService.status?.dataSwitchBlocked == true
+        val verified = AutoSwitchService.status?.dataSwitchVerified == true
+        val secure = shellState.miuiSecureDebugging
+        val detail = "Xiaomi blocks Shizuku from switching mobile data until this is on. In Developer options, " +
+            "turn on \"USB debugging (Security settings)\". Xiaomi only allows it with a SIM card in the phone " +
+            "and a Mi account signed in."
+        return Check(
+            title = "USB debugging (Security settings)",
+            ok = !blocked && (secure == true || verified),
+            detail = when {
+                blocked -> "Mobile data didn't switch. $detail"
+                secure == null -> "$detail (Can't check until Shizuku is running.)"
+                else -> detail
+            },
+            required = blocked || (secure == false && !verified),
+            actions = listOf(
+                "Open Developer options" to { open(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) },
+            ),
+        )
+    }
+
+    private fun miuiChecks(): List<Check> {
+        val autostart = Check(
+            title = "MIUI Autostart",
+            ok = shellState.miuiAutostart == true,
+            detail = "Lets AutoWiFi start again after a reboot. \"Set up everything automatically\" turns it " +
+                "on; if it stays off, switch on AutoWiFi in the Autostart screen.",
+            required = false,
+            actions = listOf(
+                "Open Autostart" to {
+                    if (!tryOpen(DeviceSetup.miuiAutostartIntent())) open(DeviceSetup.appDetailsIntent(packageName))
+                },
+            ),
+        )
+        val battery = Check(
+            title = "MIUI battery saver: No restrictions",
+            ok = prefs.miuiBatteryConfirmed,
+            detail = "MIUI closes background apps on its own. Set Battery saver to \"No restrictions\" for " +
+                "AutoWiFi and for Shizuku, then tap Done. (Apps can't check this setting, so you confirm it.)",
+            required = false,
+            actions = listOf(
+                "AutoWiFi" to { openMiuiBattery(packageName, getString(R.string.app_name)) },
+                "Shizuku" to { openMiuiBattery(DeviceSetup.SHIZUKU_PACKAGE, "Shizuku") },
+                "Done" to {
+                    prefs.miuiBatteryConfirmed = true
+                    refresh()
+                },
+            ),
+        )
+        return listOf(autostart, battery)
+    }
+
+    private fun openMiuiBattery(pkg: String, label: String) {
+        if (!tryOpen(DeviceSetup.miuiBatteryIntent(pkg, label))) open(DeviceSetup.appDetailsIntent(pkg))
     }
 
     private fun controlCheck(): Check {
@@ -391,18 +497,25 @@ class MainActivity : Activity() {
                 actions = listOf("Allow Shizuku" to { ShizukuShell.requestPermission() }, useRoot),
             )
         }
-        val shizukuLaunch = packageManager.getLaunchIntentForPackage(SHIZUKU_PACKAGE)
+        val shizukuLaunch = packageManager.getLaunchIntentForPackage(DeviceSetup.SHIZUKU_PACKAGE)
         val getShizuku = if (shizukuLaunch != null) {
             "Open Shizuku" to { open(shizukuLaunch) }
         } else {
             "Get Shizuku" to {
-                open(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$SHIZUKU_PACKAGE")))
+                open(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=${DeviceSetup.SHIZUKU_PACKAGE}")))
             }
+        }
+        val xiaomiTip = if (DeviceSetup.isXiaomi) {
+            " On Xiaomi: turn on Developer options by tapping \"MIUI version\" 7 times in Settings → About " +
+                "phone. If Shizuku's box for the pairing code doesn't appear, set the notification style to " +
+                "Android in Settings → Notifications & Control center."
+        } else {
+            ""
         }
         return Check(
             title, false,
-            "Needed to switch mobile data (and Wi-Fi on Android 10+). Install Shizuku and start it " +
-                "(Android 11+ can start it with Wireless debugging, no computer needed), or use root.",
+            "Needed to switch mobile data (and Wi-Fi on Android 10+). Install Shizuku, connect to Wi-Fi and start " +
+                "it with Wireless debugging (no computer needed on Android 11+), or use root.$xiaomiTip",
             required = true,
             actions = listOf(getShizuku, useRoot),
         )
@@ -439,6 +552,63 @@ class MainActivity : Activity() {
 
     private fun requestLocationPermission() {
         requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 2)
+    }
+
+    private fun runAutoSetup() {
+        if (Privileged.backend(this) == Backend.NONE) {
+            AlertDialog.Builder(this)
+                .setTitle("Shizuku first")
+                .setMessage(
+                    "Automatic setup needs Shizuku (or root). Start Shizuku, then tap \"Allow Shizuku\" in the " +
+                        "first Setup item, and try again.",
+                )
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+        autoSetupRunning = true
+        refresh()
+        background.execute {
+            val steps = DeviceSetup.runAutoSetup(applicationContext)
+            val state = DeviceSetup.readShellState(applicationContext)
+            ui.post {
+                autoSetupRunning = false
+                shellState = state
+                shellStateAt = SystemClock.elapsedRealtime()
+                if (isDestroyed) return@post
+                if (hasLocationPermission()) {
+                    prefs.enabled = true
+                    startService()
+                }
+                showAutoSetupResult(steps)
+                refresh()
+            }
+        }
+    }
+
+    private fun showAutoSetupResult(steps: List<Pair<String, Boolean>>) {
+        val lines = steps.map { (label, ok) -> "${if (ok) "✓" else "✗"}  $label" }.toMutableList()
+        if (prefs.enabled) lines += "✓  Auto-switching turned on"
+
+        val todo = mutableListOf<String>()
+        if (DeviceSetup.isXiaomi && shellState.miuiSecureDebugging != true &&
+            AutoSwitchService.status?.dataSwitchVerified != true
+        ) {
+            todo += "Turn on \"USB debugging (Security settings)\" in Developer options (needs a SIM card and " +
+                "a Mi account). Without it, Xiaomi won't let AutoWiFi switch mobile data."
+        }
+        if (DeviceSetup.isXiaomi && !prefs.miuiBatteryConfirmed) {
+            todo += "Set MIUI Battery saver to \"No restrictions\" for AutoWiFi and Shizuku."
+        }
+        if (steps.any { !it.second }) todo += "Anything marked ✗ has a button in the Setup list."
+
+        val message = lines.joinToString("\n") +
+            if (todo.isEmpty()) "\n\nAll done!" else "\n\nStill to do by hand:\n" + todo.joinToString("\n") { "• $it" }
+        AlertDialog.Builder(this)
+            .setTitle("Automatic setup")
+            .setMessage(message)
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private fun tryRoot() {
@@ -579,6 +749,14 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     private fun isScanAlwaysAvailable(): Boolean = wifi.isScanAlwaysAvailable
 
+    /** Opens a screen if this phone has it. */
+    private fun tryOpen(intent: Intent): Boolean = try {
+        startActivity(intent)
+        true
+    } catch (e: Exception) {
+        false
+    }
+
     private fun open(intent: Intent) {
         try {
             startActivity(intent)
@@ -592,7 +770,6 @@ class MainActivity : Activity() {
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     private companion object {
-        const val SHIZUKU_PACKAGE = "moe.shizuku.privileged.api"
         const val ACCENT = 0xFF1E88E5.toInt()
         const val GOOD = 0xFF43A047.toInt()
         const val BAD = 0xFFE53935.toInt()
