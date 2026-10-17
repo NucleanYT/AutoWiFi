@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -26,3 +28,17 @@ jobs:
           name: AutoWiFi-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      # Publishes the APK at a fixed link that opens on a phone without signing in:
+      # https://github.com/NucleanYT/AutoWiFi/releases/download/latest/AutoWiFi.apk
+      - name: Publish APK as the "latest" release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk AutoWiFi.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest AutoWiFi.apk \
+            --target "${{ github.sha }}" \
+            --title "AutoWiFi (latest build)" \
+            --notes "Built from ${{ github.ref_name }} at ${{ github.sha }}. Download AutoWiFi.apk below and open it on your phone to install."

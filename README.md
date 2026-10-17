@@ -21,8 +21,8 @@ Without either one, AutoWiFi still watches for saved networks and shows a notifi
 
 ## Install
 
-1. Open the [Actions tab](../../actions), pick the latest successful **Build APK** run, and download the **AutoWiFi-apk** artifact.
-2. Unzip it and install `app-debug.apk` on your phone (you'll need to allow installing apps from unknown sources).
+1. On your phone, open **https://github.com/NucleanYT/AutoWiFi/releases/download/latest/AutoWiFi.apk**. The download starts right away.
+2. Open the downloaded `AutoWiFi.apk` and tap **Install**. If Android asks, allow your browser or file manager to install unknown apps.
 
 Each build is signed with a different temporary key. If Android won't install over an older build, uninstall the old one first.
 
