@@ -1,5 +1,6 @@
 package com.nucleanyt.autowifi
 
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -19,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.telephony.TelephonyManager
@@ -34,6 +36,10 @@ class AutoSwitchService : Service() {
 
     data class Status(
         val backend: Backend,
+        /** How switching is done right now, or null when it can't be. */
+        val method: String?,
+        /** Something the user should fix, shown in the app and notification. */
+        val problem: String?,
         val wifiOn: Boolean,
         val wifiSsid: String?,
         val dataOn: Boolean?,
@@ -51,6 +57,8 @@ class AutoSwitchService : Service() {
     private lateinit var connectivity: ConnectivityManager
     private lateinit var telephony: TelephonyManager
     private lateinit var notifications: NotificationManager
+    private lateinit var powerManager: PowerManager
+    private lateinit var keyguard: KeyguardManager
     private lateinit var worker: HandlerThread
     private lateinit var handler: Handler
     private lateinit var policy: SwitchPolicy
@@ -63,6 +71,10 @@ class AutoSwitchService : Service() {
     private var dataToVerify: Boolean? = null
     private var dataSwitchBlocked = false
     private var dataSwitchVerified = false
+    private var lastDataViaShell = false
+    /** The shell's `svc data` was seen to do nothing (MIUI without "USB debugging (Security settings)"). */
+    private var shellDataBlocked = false
+    private var tileProblem: String? = null
     private var lastAction = "Nothing yet"
     private var shownHint: String? = null
     private var shownNotificationText: String? = null
@@ -105,6 +117,8 @@ class AutoSwitchService : Service() {
         connectivity = getSystemService(ConnectivityManager::class.java)
         telephony = getSystemService(TelephonyManager::class.java)
         notifications = getSystemService(NotificationManager::class.java)
+        powerManager = getSystemService(PowerManager::class.java)
+        keyguard = getSystemService(KeyguardManager::class.java)
         createChannels(this)
         worker = HandlerThread("autowifi-worker").apply { start() }
         handler = Handler(worker.looper)
@@ -173,6 +187,7 @@ class AutoSwitchService : Service() {
             addAction(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
             addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
             addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
             addAction(Intent.ACTION_AIRPLANE_MODE_CHANGED)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -225,8 +240,17 @@ class AutoSwitchService : Service() {
         val decision = policy.decide(snapshot, config)
         val backend = Privileged.backend(this)
 
+        // Tapping Quick settings tiles only works while the phone is unlocked and in use; otherwise
+        // wait for the unlock (ACTION_USER_PRESENT) instead of using up the cooldown.
+        val canTap = ToggleService.instance != null
+        val userActive = powerManager.isInteractive && !keyguard.isKeyguardLocked
+        val wifiCanSwitchNow = backend != Backend.NONE || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || userActive
+        val dataViaShell = backend != Backend.NONE && !(shellDataBlocked && canTap)
+
         val wantWifi = decision.wifi
-        if (wantWifi != null && wantWifi != wifiOn && now - lastWifiCommandAt >= COMMAND_COOLDOWN_MS) {
+        if (wantWifi != null && wantWifi != wifiOn && wifiCanSwitchNow &&
+            now - lastWifiCommandAt >= COMMAND_COOLDOWN_MS
+        ) {
             lastWifiCommandAt = now
             if (setWifi(wantWifi, backend)) lastAction = "Turned Wi-Fi ${onOff(wantWifi)} (${time()})"
         }
@@ -237,17 +261,24 @@ class AutoSwitchService : Service() {
         if (verifying != null && now - lastDataCommandAt >= DATA_VERIFY_DELAY_MS) {
             readDataRaw()?.let { actual ->
                 dataSwitchBlocked = actual != verifying
-                if (dataSwitchBlocked) lastCommandedData = actual else dataSwitchVerified = true
+                if (dataSwitchBlocked) {
+                    lastCommandedData = actual
+                    if (lastDataViaShell) shellDataBlocked = true
+                } else {
+                    dataSwitchVerified = true
+                }
             }
             dataToVerify = null
         }
 
         var dataOn = readDataEnabled(backend)
         val wantData = decision.data
-        val dataCooldown = if (dataSwitchBlocked) BLOCKED_RETRY_MS else COMMAND_COOLDOWN_MS
-        if (wantData != null && wantData != (dataOn ?: lastCommandedData) && now - lastDataCommandAt >= dataCooldown) {
+        val dataCooldown = if (dataSwitchBlocked && !canTap) BLOCKED_RETRY_MS else COMMAND_COOLDOWN_MS
+        if (wantData != null && wantData != (dataOn ?: lastCommandedData) && (dataViaShell || userActive) &&
+            now - lastDataCommandAt >= dataCooldown
+        ) {
             lastDataCommandAt = now
-            if (setData(wantData, backend)) {
+            if (setData(wantData, dataViaShell)) {
                 lastCommandedData = wantData
                 dataToVerify = wantData
                 dataOn = wantData
@@ -256,9 +287,9 @@ class AutoSwitchService : Service() {
             }
         }
 
-        // Without Shizuku/root we can only suggest the switch.
+        // Without Shizuku, root or the accessibility service we can only suggest the switch.
         val hint = when {
-            backend != Backend.NONE -> null
+            backend != Backend.NONE || canTap -> null
             wantWifi == true && !isWifiOn() ->
                 "Saved Wi-Fi \"${inRange.firstOrNull()}\" is in range — tap to turn Wi-Fi on" to
                     settingsPanelIntent(Settings.Panel.ACTION_WIFI, Settings.ACTION_WIFI_SETTINGS)
@@ -276,8 +307,25 @@ class AutoSwitchService : Service() {
             shownHint = hint?.first
         }
 
+        val method = when {
+            backend != Backend.NONE && canTap -> "${backend.label} + Accessibility service"
+            backend != Backend.NONE -> backend.label
+            canTap -> "Accessibility service"
+            else -> null
+        }
+        val problem = when {
+            method == null -> "Turn on the AutoWiFi service in Accessibility settings so it can switch for you."
+            tileProblem != null -> tileProblem
+            dataSwitchBlocked && lastDataViaShell ->
+                "Mobile data didn't switch. Turn on the AutoWiFi accessibility service, or on Xiaomi turn on " +
+                    "\"USB debugging (Security settings)\"."
+            dataSwitchBlocked -> "Mobile data didn't switch."
+            else -> null
+        }
         val current = Status(
             backend = backend,
+            method = method,
+            problem = problem,
             wifiOn = isWifiOn(),
             wifiSsid = ssid,
             dataOn = dataOn,
@@ -341,15 +389,36 @@ class AutoSwitchService : Service() {
     private fun setWifi(on: Boolean, backend: Backend): Boolean {
         // Before Android 10 normal apps may still toggle Wi-Fi themselves.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && wifi.setWifiEnabled(on)) return true
-        if (backend == Backend.NONE) return false
-        val arg = if (on) "enable" else "disable"
-        if (Privileged.exec(this, "svc wifi $arg")?.ok == true) return true
-        return Privileged.exec(this, "cmd wifi set-wifi-enabled ${if (on) "enabled" else "disabled"}")?.ok == true
+        if (backend != Backend.NONE) {
+            if (Privileged.exec(this, "svc wifi ${if (on) "enable" else "disable"}")?.ok == true) return true
+            val arg = if (on) "enabled" else "disabled"
+            if (Privileged.exec(this, "cmd wifi set-wifi-enabled $arg")?.ok == true) return true
+        }
+        // The tile flips the current state, which is right because we only get here when it differs.
+        return tapTile(ToggleService.Tile.WIFI, "Wi-Fi")
     }
 
-    private fun setData(on: Boolean, backend: Backend): Boolean {
-        if (backend == Backend.NONE) return false
-        return Privileged.exec(this, "svc data ${if (on) "enable" else "disable"}")?.ok == true
+    private fun setData(on: Boolean, viaShell: Boolean): Boolean {
+        lastDataViaShell = viaShell
+        if (viaShell) return Privileged.exec(this, "svc data ${if (on) "enable" else "disable"}")?.ok == true
+        // Only tap when we know the current state, so the tap can't switch it the wrong way.
+        if (readDataRaw() == null) return false
+        return tapTile(ToggleService.Tile.MOBILE_DATA, "Mobile data")
+    }
+
+    /** Taps a Quick settings tile through [ToggleService]; only while the phone is unlocked and in use. */
+    private fun tapTile(tile: ToggleService.Tile, name: String): Boolean {
+        val service = ToggleService.instance ?: return false
+        if (!powerManager.isInteractive || keyguard.isKeyguardLocked) return false
+        val ok = service.tapTile(tile)
+        Log.d(TAG, "Tapped $name tile: $ok")
+        tileProblem = if (ok) {
+            null
+        } else {
+            "Couldn't find the $name tile in Quick settings. Make sure the Wi-Fi and Mobile data tiles are on " +
+                "the first page of Quick settings."
+        }
+        return ok
     }
 
     private fun updateStatusNotification(s: Status) {
@@ -360,8 +429,8 @@ class AutoSwitchService : Service() {
             else -> "No saved Wi-Fi in range"
         }
         val text = "Wi-Fi ${onOff(s.wifiOn)} · Mobile data ${s.dataOn?.let { onOff(it) } ?: "?"}" + when {
-            s.backend == Backend.NONE -> " · Shizuku/root not set up"
-            s.dataSwitchBlocked -> " · Can't switch data — open AutoWiFi"
+            s.method == null -> " · Turn on the AutoWiFi service"
+            s.problem != null -> " · Can't switch — open AutoWiFi"
             else -> ""
         }
         if (title + text == shownNotificationText) return

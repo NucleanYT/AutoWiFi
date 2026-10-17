@@ -137,8 +137,8 @@ class MainActivity : Activity() {
         root.addView(header("Setup"))
         root.addView(
             small(
-                "1. Get Shizuku running and allow AutoWiFi to use it (first item below).\n" +
-                    "2. Tap \"Set up everything automatically\" — it does the rest.",
+                "Work down this list until everything has a ✓. The first item is the one that does the " +
+                    "switching — no Shizuku or root needed.",
             ),
         )
         autoSetupButton = Button(this).apply {
@@ -188,9 +188,10 @@ class MainActivity : Activity() {
                 "Every 30 seconds AutoWiFi checks which Wi-Fi networks are around. When a saved network " +
                     "is in range it turns Wi-Fi on, and once Wi-Fi is connected it turns mobile data off. " +
                     "When you leave, it turns mobile data back on and Wi-Fi off.\n\n" +
-                    "Android does not let normal apps switch mobile data (or Wi-Fi on Android 10+), so " +
-                    "AutoWiFi uses Shizuku or root for that. Without them it shows a notification you can " +
-                    "tap to switch yourself.",
+                    "Android does not let apps switch mobile data (or Wi-Fi on Android 10+) directly, so the " +
+                    "AutoWiFi accessibility service taps the Quick settings tiles for you while the phone is " +
+                    "unlocked. If the phone is locked, the switch happens as soon as you unlock it. With " +
+                    "Shizuku or root it switches silently instead.",
             ),
         )
 
@@ -232,6 +233,8 @@ class MainActivity : Activity() {
     private fun refresh() {
         if (isDestroyed) return
         refreshShellState()
+        // Automatic setup needs shell rights, so only offer it when Shizuku or root is ready.
+        autoSetupButton.visibility = if (Privileged.backend(this) == Backend.NONE) View.GONE else View.VISIBLE
         autoSetupButton.isEnabled = !autoSetupRunning
         autoSetupButton.text = if (autoSetupRunning) "Setting up…" else "Set up everything automatically"
 
@@ -299,9 +302,9 @@ class MainActivity : Activity() {
         return "${s.reason}\n" +
             "Wi-Fi: $wifiText\n" +
             "Mobile data: $dataText\n" +
-            "Control: ${if (s.backend == Backend.NONE) "suggestions only (no Shizuku/root)" else s.backend.label}\n" +
+            "Switching with: ${s.method ?: "nothing yet — see Setup below"}\n" +
             "Last action: ${s.lastAction}" +
-            if (s.dataSwitchBlocked) "\n⚠ Mobile data didn't switch — see Setup below." else ""
+            (s.problem?.let { "\n⚠ $it" } ?: "")
     }
 
     private fun checkView(check: Check) = LinearLayout(this).apply {
@@ -358,8 +361,11 @@ class MainActivity : Activity() {
     private fun checks(): List<Check> {
         val list = mutableListOf<Check>()
 
+        list += accessibilityCheck()
         list += controlCheck()
-        if (DeviceSetup.isXiaomi) list += miuiDebuggingCheck()
+        if (DeviceSetup.isXiaomi && Privileged.backend(this) != Backend.NONE && ToggleService.instance == null) {
+            list += miuiDebuggingCheck()
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list += Check(
@@ -483,17 +489,39 @@ class MainActivity : Activity() {
         if (!tryOpen(DeviceSetup.miuiBatteryIntent(pkg, label))) open(DeviceSetup.appDetailsIntent(pkg))
     }
 
+    private fun accessibilityCheck(): Check {
+        val shellReady = Privileged.backend(this) != Backend.NONE
+        val path = if (DeviceSetup.isXiaomi) {
+            "Settings → Additional settings → Accessibility → Downloaded apps → AutoWiFi"
+        } else {
+            "Settings → Accessibility → AutoWiFi (sometimes under \"Downloaded apps\" or \"Installed apps\")"
+        }
+        return Check(
+            title = "AutoWiFi service (Accessibility)",
+            ok = ToggleService.instance != null,
+            detail = "This is what switches Wi-Fi and mobile data for you. When it needs to switch, it opens Quick " +
+                "settings for a moment and taps the Wi-Fi or Mobile data tile — only while your phone is unlocked. " +
+                "Turn it on in $path. Keep the Wi-Fi and Mobile data tiles on the first page of Quick settings. " +
+                "If Android says \"Restricted setting\", open AutoWiFi's App info → ⋮ → Allow restricted settings.",
+            required = !shellReady,
+            actions = listOf(
+                "Turn on" to { open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                "App info" to { open(DeviceSetup.appDetailsIntent(packageName)) },
+            ),
+        )
+    }
+
     private fun controlCheck(): Check {
-        val title = "Shizuku or root access"
-        if (ShizukuShell.isReady()) return Check(title, true, "Using Shizuku.", required = true)
-        if (prefs.useRoot) return Check(title, true, "Using root.", required = true)
+        val title = "Shizuku or root (optional)"
+        if (ShizukuShell.isReady()) return Check(title, true, "Using Shizuku.", required = false)
+        if (prefs.useRoot) return Check(title, true, "Using root.", required = false)
 
         val useRoot = "Use root" to ::tryRoot
         if (ShizukuShell.isRunning()) {
             return Check(
                 title, false,
                 "Shizuku is running — allow AutoWiFi to use it.",
-                required = true,
+                required = false,
                 actions = listOf("Allow Shizuku" to { ShizukuShell.requestPermission() }, useRoot),
             )
         }
@@ -514,9 +542,10 @@ class MainActivity : Activity() {
         }
         return Check(
             title, false,
-            "Needed to switch mobile data (and Wi-Fi on Android 10+). Install Shizuku, connect to Wi-Fi and start " +
-                "it with Wireless debugging (no computer needed on Android 11+), or use root.$xiaomiTip",
-            required = true,
+            "Not needed if the AutoWiFi service above is on. With Shizuku or root, AutoWiFi switches silently " +
+                "(without opening Quick settings) and can set itself up with one tap. Shizuku is started with " +
+                "Wireless debugging, and without root it has to be started again after every reboot.$xiaomiTip",
+            required = false,
             actions = listOf(getShizuku, useRoot),
         )
     }
@@ -533,8 +562,8 @@ class MainActivity : Activity() {
         prefs.enabled = on
         if (on) {
             startService()
-            if (Privileged.backend(this) == Backend.NONE) {
-                toast("Without Shizuku or root AutoWiFi can only suggest when to switch.")
+            if (Privileged.backend(this) == Backend.NONE && ToggleService.instance == null) {
+                toast("Turn on the AutoWiFi service in Accessibility settings so it can switch for you.")
             }
         } else {
             AutoSwitchService.stop(this)
@@ -591,11 +620,12 @@ class MainActivity : Activity() {
         if (prefs.enabled) lines += "✓  Auto-switching turned on"
 
         val todo = mutableListOf<String>()
-        if (DeviceSetup.isXiaomi && shellState.miuiSecureDebugging != true &&
+        if (DeviceSetup.isXiaomi && shellState.miuiSecureDebugging != true && ToggleService.instance == null &&
             AutoSwitchService.status?.dataSwitchVerified != true
         ) {
             todo += "Turn on \"USB debugging (Security settings)\" in Developer options (needs a SIM card and " +
-                "a Mi account). Without it, Xiaomi won't let AutoWiFi switch mobile data."
+                "a Mi account), or turn on the AutoWiFi accessibility service. Otherwise Xiaomi won't let AutoWiFi " +
+                "switch mobile data."
         }
         if (DeviceSetup.isXiaomi && !prefs.miuiBatteryConfirmed) {
             todo += "Set MIUI Battery saver to \"No restrictions\" for AutoWiFi and Shizuku."

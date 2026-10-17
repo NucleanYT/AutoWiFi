@@ -10,14 +10,11 @@ It only turns Wi-Fi on for networks you've saved, so it won't switch on for rand
 
 ## Requirements
 
-Android 8.0 or newer.
+Android 8.0 or newer. **No Shizuku or root needed.**
 
-Android doesn't let normal apps switch mobile data, or Wi-Fi on Android 10 and newer. AutoWiFi gets around that with one of these:
+Android doesn't let apps switch mobile data directly (or Wi-Fi on Android 10+). So AutoWiFi comes with an **Accessibility service**. When it needs to switch, it opens Quick settings for a moment and taps the Wi-Fi or Mobile data tile for you. It only does this while the phone is unlocked. If the phone is locked, the switch happens as soon as you unlock it.
 
-- **[Shizuku](https://shizuku.rikka.app/)** (recommended, no root needed). Install it and start it. On Android 11 and newer you can start it with *Wireless debugging*, no computer needed. Without root, you have to start Shizuku again after every reboot.
-- **Root**: tap *Use root* in the app.
-
-Without either one, AutoWiFi still watches for saved networks and shows a notification you can tap to switch yourself.
+Optional: with **[Shizuku](https://shizuku.rikka.app/)** or **root**, AutoWiFi switches silently instead, and can set itself up with one tap.
 
 ## Install
 
@@ -28,26 +25,24 @@ Each build is signed with a different temporary key. If Android won't install ov
 
 ## Setup (in the app)
 
-1. Start Shizuku. Then, in AutoWiFi's **Setup** list, tap **Allow Shizuku**.
-2. Tap **Set up everything automatically**. It will:
-   - grant AutoWiFi its location (all the time) and notification permissions,
-   - turn Location and Wi-Fi scanning on,
-   - turn battery optimization off,
-   - on Xiaomi phones, turn on MIUI Autostart for AutoWiFi and Shizuku,
-   - import your phone's saved Wi-Fi networks (Android 11+),
-   - turn auto-switching on.
-3. Do whatever the summary says is still left. Each item has a button in the Setup list.
+Work down the **Setup** list until everything has a ✓:
 
-You can still add networks by hand under **Saved Wi-Fi networks**: **Add nearby…** or **Add by name…**. Any network you connect to is added automatically.
+1. **AutoWiFi service (Accessibility)**: tap **Turn on** and switch on AutoWiFi. On Xiaomi it's in Settings → Additional settings → Accessibility → Downloaded apps. If Android says "Restricted setting", open AutoWiFi's App info → ⋮ → **Allow restricted settings**, then try again.
+2. Keep the **Wi-Fi** and **Mobile data** tiles on the first page of Quick settings.
+3. **Location permission** (choose *Allow all the time*), **Location turned on**, **Wi-Fi scanning**.
+4. **Battery optimization off** (recommended).
+5. Add your networks under **Saved Wi-Fi networks**: **Add nearby…** or **Add by name…**. Any network you connect to is added automatically.
+6. Turn on **Auto-switch between Wi-Fi and mobile data**.
+
+With Shizuku or root, a **Set up everything automatically** button appears. It does steps 3–6 for you and can import the phone's saved networks.
 
 ### Xiaomi / Redmi / POCO (MIUI)
 
 Xiaomi adds a few things no app can do for you:
 
-- **Developer options**: go to Settings → About phone and tap **MIUI version** 7 times.
-- **Pairing Shizuku**: if the box for typing the pairing code doesn't appear, set the notification style to Android in Settings → Notifications & Control center.
-- **USB debugging (Security settings)**: turn this on in Developer options. Xiaomi requires a SIM card and a Mi account for it. Without it, MIUI silently ignores mobile-data switching. AutoWiFi checks for this and warns you if mobile data didn't actually switch.
-- **Battery saver → No restrictions** for AutoWiFi and Shizuku. Apps can't read this setting, so the app opens the screen for you and you tap **Done** when it's set.
+- **Autostart**: switch on AutoWiFi in Settings → Apps → Manage apps → AutoWiFi → Autostart.
+- Only if you use Shizuku: turn on **USB debugging (Security settings)** in Developer options. Xiaomi requires a SIM card and a Mi account for it. Without it, MIUI silently ignores Shizuku's mobile-data switching, so AutoWiFi falls back to the accessibility service.
+- **Battery saver → No restrictions** for AutoWiFi (and Shizuku, if you use it). Apps can't read this setting, so the app opens the screen for you and you tap **Done** when it's set.
 
 ## Notes
 

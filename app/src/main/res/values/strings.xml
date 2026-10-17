@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AutoWiFi</string>
+    <string name="accessibility_description">Lets AutoWiFi switch Wi-Fi and mobile data for you by opening Quick settings and tapping the Wi-Fi or Mobile data tile. AutoWiFi only looks for those two tiles and does not read, store or send anything else on your screen.</string>
 </resources>
